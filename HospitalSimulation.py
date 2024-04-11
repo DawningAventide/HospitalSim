@@ -5,6 +5,7 @@ import copy
 import pandas as pd
 import matplotlib.pyplot as plt
 import sys
+import time
 
 
 SIM_TIME = 2500
@@ -12,10 +13,13 @@ PATIENTS = 100000
 SCHEDULER = "first_min"
 SCHEDULERS = ['first_min','last_min','uniform','custom']
 SPECIALTIES = ["Home","Primary Care","Opthamology","Immunology","Cardiology","Other Dr Specialty","Urology","Gastroenterology","General Surgery","OB/GYN","Nephrology","Orthopedics","Psychiatry","Neurology","Oncology","Dermatology","Otorhinolaryngology"]
-SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
-SPECIALTY_CAPS=[9999,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
-#SPECIALTY_CAPS=[12]*17
-#SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+#SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
+#SPECIALTY_CAPS=[1,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
+
+# UNCAP settings
+SPECIALTY_CAPS=[9999]*17
+SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+
 TRANSITION_MATRIX = np.zeros([3,17,17])
 TIME_LAG_MATRIX = np.zeros([3,17,17])
 PATIENT_CLASSES = ['A','B','C']
@@ -147,6 +151,7 @@ class Patient():
         # Wait for scheduling call
         self.last_appt = 0
         while True:
+            # Patient requests an appointment
             print_v(3, f"Patient {self.id}'s Last Appointment: {self.last_appt}")
             with self.current_specialist.scheduling.request() as sched_appt:
                 yield sched_appt
@@ -155,18 +160,23 @@ class Patient():
                 print_v(2, f"Patient {self.id} requests appointment at {self.current_specialist.specialty} on {env.now}")
             sched_lag = max(env.now - self.last_appt,0)
             print_v(3, f'Scheduling Lag: {sched_lag}')
+
+            # Once the scheduler is available, the patient schedules the appointment
             patient_flexibility = min(sched_lag//5,7)
             appt,wait_time,delay = schedule(self.current_specialist, patient_flexibility, self, env)
             print_v(3, f"Wait time: {wait_time}\n")
+            # Patient waits for the appointment
             yield env.timeout(wait_time)
+            # Patient attends appointment
             yield appt
             self.last_appt = env.now
             print_v(2, f"Patient {self.id} attends appointment {self.current_specialist.specialty} at {env.now}")
+            # Patient calculates their next specialty type and gets a referral
             new_specialist,self.transition_time = refer(self.current_specialist, self)
             print_v(4, f"Next Specialty: {new_specialist.specialty}")
             print_v(3, f"Transition Time: {self.transition_time}\n")
             yield env.timeout(self.transition_time)
-
+            # Patient waits for the referral to process before returning to the beginning
             self.log_visit(req_date, self.last_appt, wait_time, delay, self.current_specialist.specialty, self.referring_specialist.specialty, self.transition_time, patient_flexibility)
 
 
@@ -280,25 +290,46 @@ def refer(specialist, patient) -> (Specialty, float):
 
 
 def main():
-    filestub = sys.argv[1]
-    if filestub is None:
+    # Try to use first CLI as the filename stem and second as debug, default otherwise
+    try:
+        filestub = sys.argv[1]
+    except:
         filestub = "HospitalSim"
+
+    try:
+        debug = int(sys.argv[2])
+        DEBUG_LEVEL=debug
+    except:
+        print_v(1,"Debug level unspecified, defaulting to %d" % DEBUG_LEVEL)
+    # Initialize and run the simulation
+    start=time.time()
     env = simpy.Environment()
     network = HealthNetwork(env)
     network.populate_patients(env)
-    env.run(until=SIM_TIME)
+    poptime = time.time() - start
+    print_v(1,"Populated the network in %f seconds" % poptime)
 
+    start=time.time()
+    env.run(until=SIM_TIME)
+    runtime=time.time() - start
+    print_v(1,"Simulation run completed in %f seconds" % runtime)
+
+    # Render the internal lists into data frames
+    start=time.time()
     patient_data = pd.concat([patient.render_data() for patient in network.patient_vec])
     print(patient_data.groupby('patient_class')['delay'].mean())
     scheduler_data = pd.concat([specialist.render_data() for specialist_list in network.specialists.values() for specialist in specialist_list])
+    rendertime = time.time() - start
+    print_v(1,"Data rendering complete in %f seconds" % rendertime)
+
 
     # DATA WRITE OUT
-
+    start=time.time()
     filename_stub = f"{filestub}T{SIM_TIME}N{PATIENTS}Trial{TRIAL}"
     patient_data.to_csv("data/"+filename_stub+"-Patient.csv")
     scheduler_data.to_csv("data/"+filename_stub+"-Scheduler.csv")
-
-    #for key in network.specialists.keys():
+    writetime=time.time() - start
+    print_v(1, "Data write complete in %f seconds" %writetime)
 
 if __name__ == '__main__':
     main()

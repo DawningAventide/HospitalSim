@@ -8,16 +8,50 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE)
 library(tidyverse)
-patients <- read_csv("uncapT2500N100000Cap100000TrialFalse-Patient.csv") %>% 
+patients <- read_csv("data/variablecapT2500N100000TrialFalse-Patient.csv") %>% 
   select(-"...1")
-scheduler <- read_csv("uncapT2500N100000Cap100000TrialFalse-Scheduler.csv") %>% 
+scheduler <- read_csv("data/variablecapT2500N100000TrialFalse-Scheduler.csv") %>% 
   select(-"...1")
 
-popcap_pats <- read_csv("replicationPopCapsT2500N100000Cap10TrialFalse-Patient.csv") %>%
+pat_uncap <- read_csv("data/uncapT2500N100000TrialFalse-Patient.csv") %>%
   select(-"...1")
-popcap_sched <- read_csv("replicationPopCapsT2500N100000Cap10TrialFalse-Scheduler.csv") %>%
+sched_uncap <- read_csv("data/uncapT2500N100000TrialFalse-Scheduler.csv")%>%
   select(-"...1")
+
 ```
+
+```{r}
+scheduler_cut <- scheduler %>% filter(specialty!="Home")
+burndown_data <- scheduler_cut %>% select(call_date,patient_class,lag_time,delay,date_filled,date_remaining,specialty,specialist_id) %>% mutate(fillcap = date_filled/(date_filled+date_remaining),patient_class=as.factor(patient_class))
+
+ggplot(burndown_data, aes(x=-lag_time, y=fillcap, color=patient_class)) + geom_point(position=position_jitter(width=0.3,height=0.3),alpha=0.2) + facet_wrap(~specialty, scales='free')
+
+uncap_burndown <- sched_uncap %>% filter(specialty !="Home") %>%
+  select(patient_class,lag_time,date_filled,date_remaining,specialty,specialist_id) %>% 
+  mutate(fillcap=date_filled/(date_filled + date_remaining), patient_class=as.factor(patient_class))
+
+ggplot(uncap_burndown, aes(x=-lag_time, y=fillcap, color=patient_class)) + geom_point(position=position_jitter(width=0.3,height=0.3),alpha=0.2) + facet_wrap(~specialty, scales='free')
+```
+
+```{r}
+burndown_lines <- burndown_data %>% 
+  filter(delay==0) %>%
+  mutate(lag_ints = ceiling(lag_time)) %>%
+  group_by(patient_class,specialty,lag_ints) %>%
+  summarize(mean_fillcap = mean(fillcap), med_fillcap=median(fillcap))
+
+ggplot(burndown_lines, aes(x=-lag_ints,y=mean_fillcap,color=patient_class)) + geom_line() + facet_wrap(~specialty, scales='free')
+
+burndown_data %>%
+  filter(delay!=0) %>%
+  group_by(patient_class,specialty) %>%
+  summarize(mean_delay=mean(delay), median_delay=median(delay)) %>%
+  ggplot(aes(x=patient_class,y=mean_delay, fill=patient_class)) + geom_bar(stat='identity') + facet_wrap(~specialty)
+```
+
+
+
+
 
 ```{r}
 delayed <- popcap_pats %>%
