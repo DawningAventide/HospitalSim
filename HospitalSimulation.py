@@ -6,13 +6,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import sys
 
-DAILY_CAPACITY = 10
+
 SIM_TIME = 2500
 PATIENTS = 100000
 SCHEDULER = "first_min"
 SCHEDULERS = ['first_min','last_min','uniform','custom']
 SPECIALTIES = ["Home","Primary Care","Opthamology","Immunology","Cardiology","Other Dr Specialty","Urology","Gastroenterology","General Surgery","OB/GYN","Nephrology","Orthopedics","Psychiatry","Neurology","Oncology","Dermatology","Otorhinolaryngology"]
-SPECIALTY_COUNTS=[1,55,6,2,10,69,3,5,8,13,4,8,15,5,8,4,3]
+SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
+SPECIALTY_CAPS=[9999,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
+#SPECIALTY_CAPS=[12]*17
 #SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 TRANSITION_MATRIX = np.zeros([3,17,17])
 TIME_LAG_MATRIX = np.zeros([3,17,17])
@@ -25,7 +27,7 @@ for i in range(3):
     TRANSITION_MATRIX[i] = trans_mat_raw.loc[trans_mat_raw["conditions"] == PATIENT_CLASSES[i]].iloc[:,1:]
     TIME_LAG_MATRIX[i] = mtd_mat_raw.loc[mtd_mat_raw["conditions"]==PATIENT_CLASSES[i]].iloc[:,1:]
 
-DEBUG_LEVEL = 0
+DEBUG_LEVEL = 1
 TRIAL = False
 
 if TRIAL:
@@ -48,34 +50,27 @@ class Specialty(object):
     id: int
     appointments: [simpy.Resource]
     data: []
-    def __init__(self, sched, specialty, id, appointments, net):
+    daily_capacity: int
+    def __init__(self, sched, specialty, id, appointments, net, daily_capacity):
         self.scheduling = sched
         self.specialty = specialty
         self.id = id
         self.appointments = appointments
         self.data=[]
         self.network=net
+        self.daily_capacity= daily_capacity
 
-    def log_schedule(self, env, patient, scheduling_failed, lag_time, delay, max_date):
+    def log_schedule(self, env, patient, scheduling_failed, lag_time, delay, max_date, appt_date):
         call_date=env.now
-        calendar = self.appointments[int(call_date+1):max_date]
-        capacity = np.array([appointment.count for appointment in calendar])
-        two_wk_calendar = self.appointments[int(call_date + 1):int(call_date + 11)] # 5 day logical "weeks"
-        two_wk_capacity = np.array([appointment.count for appointment in two_wk_calendar])
         window_len = max_date - int(env.now + 1)
-        pct_appts_available = (DAILY_CAPACITY*window_len - np.sum(capacity))/(DAILY_CAPACITY*window_len)
-        days_filled = (capacity[capacity == DAILY_CAPACITY]).shape[0]
-        two_wk_pct_available = (DAILY_CAPACITY*10 - np.sum(two_wk_capacity))/(DAILY_CAPACITY*10)
-        two_wk_days_filled = (two_wk_capacity[two_wk_capacity == DAILY_CAPACITY]).shape[0]
-
-        self.data.append((call_date, patient.id, patient.pt_class, scheduling_failed, lag_time, delay, window_len, max_date, pct_appts_available, days_filled,two_wk_pct_available, two_wk_days_filled))
+        day_full = self.appointments[appt_date].count
+        day_remain = self.daily_capacity - day_full
+        self.data.append((call_date, patient.id, patient.pt_class, scheduling_failed, lag_time, delay, window_len, max_date,appt_date,day_full,day_remain))
 
     def render_data(self, verbose=False):
-        scheduler_data = pd.DataFrame(self.data, columns=["call_date","patient_id","patient_class","failed_schedule", "lag_time","delay","window_len","max_date","pct_win_available","n_win_filled","pct_10d_available","n_10d_filled"])
+        scheduler_data = pd.DataFrame(self.data, columns=["call_date","patient_id","patient_class","failed_schedule", "lag_time","delay","window_len","max_date","appt_date","date_filled","date_remaining"])
         scheduler_data["specialty"]=self.specialty
         scheduler_data["specialist_id"]=self.id
-        if verbose:
-            print_v(2, scheduler_data[["patient_class","delay","pct_win_available","n_win_filled","pct_10d_available","n_10d_filled"]].loc[scheduler_data["patient_class"]==2])
         return scheduler_data
 
     def graph_capacity(self):
@@ -98,14 +93,16 @@ class HealthNetwork(object):
         i=0
         for specialty in SPECIALTIES:
             self.specialists[specialty]=[]
+            capacity= SPECIALTY_CAPS[SPECIALTIES.index(specialty)]
             for n in range(SPECIALTY_COUNTS[i]):
                 self.specialists[specialty].append(
                 Specialty(
                     sched = simpy.Resource(env, capacity=1),
                     specialty = specialty,
                     id = n,
-                    appointments = [copy.copy(simpy.Resource(env, capacity=DAILY_CAPACITY)) for x in range(SIM_TIME + 14)],
-                    net = self
+                    appointments = [copy.copy(simpy.Resource(env, capacity=capacity)) for x in range(SIM_TIME + 14)],
+                    net = self,
+                    daily_capacity=capacity
                 ))
             i+=1
 
@@ -193,7 +190,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if specialist.specialty=="Home":
         date = int(env.now + 1)
         # auto-releasing request to unbound home capacity
-        specialist.log_schedule(env, patient, False, 0, 0, date + 1)
+        specialist.log_schedule(env, patient, False, 0, 0, date,date)
         with specialist.appointments[date].request() as appointment:
             return (appointment, max(date - env.now,0), 0)
     min_date = int(env.now + 1)
@@ -209,7 +206,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if scheduler == "first_min":
              date_raw = np.argmin(capacity)
              date = date_raw + int(env.now) + 1
-             if capacity[date_raw] >= DAILY_CAPACITY: # if appointment is full
+             if capacity[date_raw] >= specialist.daily_capacity: # if appointment is full
                 delaying = True
              else:
                  print_v(3,f"Date Selected: {date}")
@@ -217,14 +214,14 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
              date_raw = len(capacity) - np.argmin(capacity[::-1])
              date = date_raw + int(env.now)
 
-             if capacity[date_raw] >= DAILY_CAPACITY: # if appointment is full
+             if capacity[date_raw] >= specialist.daily_capacity: # if appointment is full
                 delaying = True
              else:
                  print_v(3,f"Date Selected: {date}")
     elif scheduler == "uniform":
         for attempt in range(min(int(flex*4),4)): # if four times the flexibility window can't find an appointment there ain't one
             date = np.random.randint(int(env.now) + 1,max(int(env.now)+flex*2 + 1, SIM_TIME+13))
-            if specialist.appointments[date].count < DAILY_CAPACITY:
+            if specialist.appointments[date].count < specialist.daily_capacity:
                 print_v(3,f"Date Selected: {date}")
                 break
         delaying = True
@@ -238,7 +235,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
         delayed_date = max_date
 
         while delayed_date < SIM_TIME + 13:
-            if specialist.appointments[delayed_date].count < DAILY_CAPACITY:
+            if specialist.appointments[delayed_date].count < specialist.daily_capacity:
                 date = delayed_date
                 delay = delayed_date - max_date
                 print_v(3, f"Date Selected: {date} with Delay {delay}.")
@@ -256,7 +253,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if(env.now>1):
         print_v(4,f"Capacity - New: {[appointment.count for appointment in calendar]}")
 
-    specialist.log_schedule(env, patient, failed_schedule, lag_time, delay, max_date)
+    specialist.log_schedule(env, patient, failed_schedule, lag_time, delay, max_date, date)
 
     return (appointment, lag_time, delay)
 
@@ -277,6 +274,7 @@ def refer(specialist, patient) -> (Specialty, float):
     # Generating an exponential with mean tau_ij
     wait_time = -tau_ij * np.log(1-u1_trans)
     new_specialty = SPECIALTIES[new_specialty_id]
+    #TODO choice -> rngstream
     new_specialist = np.random.choice(network.specialists[new_specialty])
     return(new_specialist, wait_time)
 
@@ -296,7 +294,7 @@ def main():
 
     # DATA WRITE OUT
 
-    filename_stub = f"{filestub}T{SIM_TIME}N{PATIENTS}Cap{DAILY_CAPACITY}Trial{TRIAL}"
+    filename_stub = f"{filestub}T{SIM_TIME}N{PATIENTS}Trial{TRIAL}"
     patient_data.to_csv("data/"+filename_stub+"-Patient.csv")
     scheduler_data.to_csv("data/"+filename_stub+"-Scheduler.csv")
 
