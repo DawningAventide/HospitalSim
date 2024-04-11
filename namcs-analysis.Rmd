@@ -1,0 +1,36 @@
+---
+title: "NAMCS cleaning"
+author: "Jay Meyer"
+date: "2024-04-02"
+output: pdf_document
+---
+
+```{r}
+library(haven)
+library(tidyverse)
+
+# CHANGE TO MATCH FILEPATH/NAME LOCALLY
+#(Source: https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Dataset_Documentation/NAMCS/stata/namcs2016-stata.zip, extracted)
+namcs2016 <- read_dta("~/Documents/Simulation/namcs/namcs-2016.dta") 
+namcs_narrow <- namcs2016 %>%
+  select(VMONTH,VDAYR,AGE,SEX,TIMEMD,TIMEMDFL,PATEVEN,APPTTIME,SASDAPPT,SDAPPTPCT,SPECCAT,SPECR,PATWT,PHYSWT,PATCODE,PHYCODE,CPSUM)
+```
+
+
+```{r}
+namcs_narrow$specnames <- plyr::mapvalues(as.factor(namcs_narrow$SPECR), from=c(1,3,4,5,6,7,8,9,10,11,12,13,14,15), to=c("General Practice","Internal Medicine","Pediatrics","General Surgery","OB/GYN","Orthopedics","Cardiology","Dermatology","Urology","Psychiatry","Neurology","Ophthalmology","Otolaryngology","Other"))
+
+
+ggplot(namcs_narrow, aes(x=TIMEMD,fill=specnames)) + geom_histogram(binwidth=5) + facet_wrap(~specnames, scales='free') + labs(title="Time With Doctor - Physician Specialty Category", subtitle="Source: NAMCS 2016",caption="* Vertical lines mark 15-, 30-, and 45-minute appointments respectively.") + scale_fill_discrete(name="Specialty Category") + xlab("Time with Doctor - Minutes") + geom_vline(xintercept=15,alpha=0.2) + geom_vline(xintercept=30,alpha=0.2) + geom_vline(xintercept = 45,alpha=0.2)
+```
+
+All of these distributions are slightly to moderately right-tailed, meaning means will tend to overestimate the center of the distribution. Using medians to calculate appointment lengths would be more suitable.
+
+With an rough 50% of the workday dedicated to in-person patient visits \footnote{Citing https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1466945/ primarily, but other and more recent articles cite similar numbers}, if we allot one half of an eight-hour workday (4 hours, or 240 minutes) in total patient time to each specialty, we can then calculate the expected number of patients a specific specialty would see in a single workday.
+Additionally, as the NAMCS appointment time is self-reported by the physicians and largely rounded to a multiple of 5 minutes, it is only reliable to an extent. As noted in the study above, visit lengths as measured by outside observers in 2005 were significantly shorter than predicted by the 2003 NAMCS survey's self-reported doctors' estimates. A separate study focused on using Electronic Health Record timestamps to estimate true visit durations noted similar effects \footnote{https://journals.lww.com/lww-medicalcare/abstract/2021/01000/measuring_primary_care_exam_length_using.10.aspx}.
+Due to these weaknesses in our sampling method, the reported visit durations are more likely to be overestimates than underestimates, meaning that the initial calculated slot numbers may be lower than they might otherwise have been.
+
+```{r}
+namcs_narrow %>% group_by(specnames) %>% dplyr::summarize(wm = weighted.mean(TIMEMD,PATWT),med=median(TIMEMD),wm_slots=floor(240/wm), med_slots=floor(240/med),n=n())
+
+```

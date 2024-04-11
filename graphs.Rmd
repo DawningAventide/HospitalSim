@@ -1,0 +1,77 @@
+---
+title: "Trace Analysis"
+author: "Jay Meyer"
+date: "2024-03-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+patients <- read_csv("uncapT2500N100000Cap100000TrialFalse-Patient.csv") %>% 
+  select(-"...1")
+scheduler <- read_csv("uncapT2500N100000Cap100000TrialFalse-Scheduler.csv") %>% 
+  select(-"...1")
+
+popcap_pats <- read_csv("replicationPopCapsT2500N100000Cap10TrialFalse-Patient.csv") %>%
+  select(-"...1")
+popcap_sched <- read_csv("replicationPopCapsT2500N100000Cap10TrialFalse-Scheduler.csv") %>%
+  select(-"...1")
+```
+
+```{r}
+delayed <- popcap_pats %>%
+  filter(delay != 0)
+
+
+ggplot(delayed, aes(x = flex, y = delay, color = factor(patient_class))) + geom_point(alpha=0.5,position="jitter") + scale_x_log10() + scale_color_brewer(palette="RdYlBu") + theme_dark() + facet_wrap(~specialty, scales='free')
+```
+
+```{r}
+ggplot(delayed, aes(x = factor(patient_class), y = delay, fill = factor(patient_class))) + geom_boxplot() + scale_fill_brewer(palette="RdYlBu")
+
+```
+
+
+```{r}
+flex_adj <- patients %>% mutate(wait_norm = wait/(2*flex + 1)) %>%
+  filter(specialty!="Home")
+flex_cap_adj <- popcap_pats %>% mutate(wait_norm=wait/(2*flex+1)) %>%
+  filter(specialty!="Home")
+
+ggplot(flex_cap_adj, aes(x=wait_norm)) + geom_histogram() + facet_wrap(~factor(specialty),scales='free') + scale_y_log10()
+
+ggplot(flex_adj, aes(x=wait_norm)) + geom_histogram() + facet_wrap(~factor(specialty)) + scale_y_log10()
+```
+
+```{r}
+scheduler %>% 
+  filter(specialty!="Home")%>%
+  mutate(pct_win_filled = 1- pct_win_available) %>%
+  filter(call_date > 200) %>%
+  ggplot(aes(x = lag_time)) + geom_histogram() + facet_wrap(~specialty, scales='free') 
+
+```
+
+```{r}
+daily_reqs <- scheduler %>% mutate(req_date = floor(call_date)) %>% group_by(req_date,specialty) %>% summarize(n = n())
+daily_reqs %>%
+  filter(req_date != 0) %>%
+  ggplot(aes(x=n)) + geom_histogram() + facet_wrap(~specialty, scales='free')
+```
+
+```{r}
+daily_cap_reqs <- popcap_sched %>% mutate(req_date = floor(call_date)) %>% group_by(req_date,specialty) %>% summarize(n=n())
+daily_cap_reqs %>%
+  filter(req_date!=0) %>%
+  ggplot(aes(x=n)) + geom_histogram(bins=20) + facet_wrap(~specialty, scales='free')
+
+```
+
+
+```{r}
+cap_sched_cumul <- popcap_sched %>% group_by(appt_date,specialty,specialist_id)
+cap_sched_cumul <- cap_sched_cumul %>% mutate(helper=1,cumsums=cumsum(helper)) %>% select(-helper)
+cumul_scheds <- cap_sched_cumul %>% select(call_date,patient_class,lag_time,delay,specialty,specialist_id,appt_date,cumsums) %>% rename(day_filled=cumsums)
+cumul_scheds <- cumul_scheds %>% filter(specialty != 'Home')
+```
