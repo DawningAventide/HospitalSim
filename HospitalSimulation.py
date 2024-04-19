@@ -1,5 +1,6 @@
 import simpy
 import numpy as np
+# Make sure rngstream.so is in the folder if getting import issues
 import rngStream
 import copy
 import pandas as pd
@@ -7,47 +8,99 @@ import matplotlib.pyplot as plt
 import sys
 import time
 
-
+# Duration of the simulation in days (5-day week, 250d year)
 SIM_TIME = 2500
+# Number of patients
 PATIENTS = 100000
+
+# Scheduling heuristic (first_min recommended, custom unimplemented)
+# Descriptions in original paper
 SCHEDULER = "first_min"
 SCHEDULERS = ['first_min','last_min','uniform','custom']
-SPECIALTIES = ["Home","Primary Care","Opthamology","Immunology","Cardiology","Other Dr Specialty","Urology","Gastroenterology","General Surgery","OB/GYN","Nephrology","Orthopedics","Psychiatry","Neurology","Oncology","Dermatology","Otorhinolaryngology"]
-#SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
-#SPECIALTY_CAPS=[1,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
+# Specialty names - do not change, order-sensitive
+SPECIALTIES = ["Home","Primary Care","Ophthalmology","Immunology","Cardiology","Other Dr Specialty","Urology","Gastroenterology","General Surgery","OB/GYN","Nephrology","Orthopedics","Psychiatry","Neurology","Oncology","Dermatology","Otorhinolaryngology"]
+# Count of each specialty to instantiate - based on rates per 100k patients
+SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
+# Daily capacity of each specialty, derived from NAMCS 2016
+SPECIALTY_CAPS=[1,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
 
-# UNCAP settings
-SPECIALTY_CAPS=[9999]*17
-SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+# UNCAP settings - uncomment to set uncapacitated:
+#SPECIALTY_CAPS=[99999]*17
+#SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 
+# Preferential Referral Settings
+# Set turnover_base >= 1 to disable preferential referral and randomly assign all.
+# Yearly expected doctor turnover
+GLOBAL_TURNOVER = 0.06
+# Per-appointment turnover chance
+TURNOVER_BASE = 0.01
+
+# Rate modifiers on f(doctor-related turnover,t)
+SPECIALIST_TURNOVER_MOD = [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+
+
+# Verbosity, controls print_v calls
+DEBUG_LEVEL = 1
+
+# Set a specific replicable seed if True
+TRIAL = False
+
+# Number of progress updates to post
+# (ideally divides SIM_TIME but you can be messy, it won't break, I'll just judge you a little)
+PROGRESS_BARS = 100
+
+#===================================================================#
+# END OF PARAMETER ZONE - PROCEED AT OWN RISK
+#
+#===================================================================#
+
+# Initializing a few global counters
+PROG_ITER = 0
+LAST_CHKPT = 0
+RUN_START = 0
+# Initializing probabilistic matrices
 TRANSITION_MATRIX = np.zeros([3,17,17])
 TIME_LAG_MATRIX = np.zeros([3,17,17])
+# Setting up patient classes (See original thesis for numerical breaks)
+# TLDR: A- fewest chronic conditions, B- in between, C- most
 PATIENT_CLASSES = ['A','B','C']
 PATIENT_CLASS_PROBS = [.7054,.1872,.1074]
+
+# Reading in transition parameters
 trans_mat_raw = pd.read_csv("parameters/mrp_trans_probs.csv", sep=',',header=0,index_col='from_desc')
 mtd_mat_raw = pd.read_csv("parameters/mrp_mtds.csv", sep=",",header=0,index_col='from_desc')
-
 for i in range(3):
     TRANSITION_MATRIX[i] = trans_mat_raw.loc[trans_mat_raw["conditions"] == PATIENT_CLASSES[i]].iloc[:,1:]
     TIME_LAG_MATRIX[i] = mtd_mat_raw.loc[mtd_mat_raw["conditions"]==PATIENT_CLASSES[i]].iloc[:,1:]
 
-DEBUG_LEVEL = 1
-TRIAL = False
-
+# RNGSTREAM setup
 if TRIAL:
-    # RNGSTREAM setup
+    # adjust the seed if you want different replicable runs.
+    # you know how seeds work. I hope.
     seed0 = [23456,23456,23456,23456,23456,23456]
     rngStream.SetPackageSeed(seed0)
 unigens = {}
 unigens["refer"] = rngStream.RngStream()
-unigens["trans_exp"] = rngStream.RngStream()
+unigens["trans-exp"] = rngStream.RngStream()
 unigens["init-class"] = rngStream.RngStream()
 unigens["init-specialty"] = rngStream.RngStream()
+unigens["init-specialist"] = rngStream.RngStream()
+unigens["refer-specialist"] = rngStream.RngStream()
+unigens["pref-referral"] = rngStream.RngStream()
 
+
+# Globally tunable debug levels
 def print_v(debug, *args):
     if debug <= DEBUG_LEVEL:
         print(*args)
 
+# np.choice-like wrapper for RngStream for replicability
+def rng_choice(generator,array):
+    u = generator.RandU01()
+    l = len(array)
+    return array[int(u*l)]
+
+# Specialist instance class
 class Specialty(object):
     scheduling: simpy.Resource
     specialty: str
@@ -87,7 +140,7 @@ class Specialty(object):
         class_colors = ['green' if patient_class == 0 else 'blue' if patient_class==1 else 'red' for patient_class in scheduler_data["patient_class"]]
         plt.scatter(scheduler_data["call_date"],scheduler_data["lag_time"], color=class_colors,alpha=0.5)
 
-
+# Wrapper class that instantiates and manages specialties and patients
 class HealthNetwork(object):
     # Dict of list[Specialty] objects by type
     specialists = {}
@@ -123,7 +176,7 @@ class HealthNetwork(object):
             specialty = SPECIALTIES[np.argmin(np.where(cumul_specialties - u1_specialty < 0, 2, cumul_specialties))]
 
 
-            specialist = np.random.choice(self.specialists[specialty])
+            specialist = rng_choice(unigens["init-specialist"],self.specialists[specialty])
 
 
             pat = Patient(specialist, i, patient_class)
@@ -131,7 +184,7 @@ class HealthNetwork(object):
             env.process(pat.patient(env))
 
 
-
+# Individual patient class
 class Patient():
     current_specialist: Specialty
     id: int
@@ -139,6 +192,7 @@ class Patient():
     last_appt: float
     pt_class: int #[0,1,2] -> ["A","B","C"]
     transition_time: float
+    care_team: {}
 
     def __init__(self, specialist, id, pt_class):
         self.current_specialist = specialist
@@ -146,11 +200,26 @@ class Patient():
         self.id = id
         self.pt_class = pt_class
         self.data = []
+        # specialist id, date of last contact
+        self.care_team = {sp:(-1,-1) for sp in SPECIALTIES}
 
+    # Main patient loop - reference SimPy prn
     def patient(self, env):
+
         # Wait for scheduling call
         self.last_appt = 0
         while True:
+            global PROG_ITER
+            global LAST_CHKPT
+            #If we've hit a checkpoint, note it
+            if(env.now > 0 and int(env.now)//(SIM_TIME//PROGRESS_BARS) >= PROG_ITER):
+                PROG_ITER += 1
+                now = time.time()
+                dt = now-LAST_CHKPT
+                elapsed=now-RUN_START
+                LAST_CHKPT=now
+                print_v(1,"%d/%d: %.3f sec, %.3f sec elapsed." %(PROG_ITER,PROGRESS_BARS,dt,elapsed))
+
             # Patient requests an appointment
             print_v(3, f"Patient {self.id}'s Last Appointment: {self.last_appt}")
             with self.current_specialist.scheduling.request() as sched_appt:
@@ -172,7 +241,7 @@ class Patient():
             self.last_appt = env.now
             print_v(2, f"Patient {self.id} attends appointment {self.current_specialist.specialty} at {env.now}")
             # Patient calculates their next specialty type and gets a referral
-            new_specialist,self.transition_time = refer(self.current_specialist, self)
+            new_specialist,self.transition_time = refer(self.current_specialist, self, env)
             print_v(4, f"Next Specialty: {new_specialist.specialty}")
             print_v(3, f"Transition Time: {self.transition_time}\n")
             yield env.timeout(self.transition_time)
@@ -183,10 +252,11 @@ class Patient():
             self.referring_specialist = self.current_specialist
             self.current_specialist = new_specialist
 
-
+    # Add visit data to internal storage
     def log_visit(self, req_date, appt_date, wait, delay, specialist, referrer, transition_time, flexibility):
         self.data.append((req_date, appt_date, wait, delay, specialist, referrer, transition_time, flexibility))
 
+    # Write out the full patient trace for the individual
     def render_data(self, verbose=False):
         patient_data = pd.DataFrame(self.data, columns=["req",'appt','wait','delay','specialty','referring','transition','flex'])
         patient_data["patient_id"]=self.id
@@ -195,7 +265,7 @@ class Patient():
             print_v(2, patient_data[["appt","wait","delay","flex","specialty","referring"]])
         return patient_data
 
-
+# Schedules a patient with a specialist
 def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if specialist.specialty=="Home":
         date = int(env.now + 1)
@@ -230,7 +300,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
                  print_v(3,f"Date Selected: {date}")
     elif scheduler == "uniform":
         for attempt in range(min(int(flex*4),4)): # if four times the flexibility window can't find an appointment there ain't one
-            date = np.random.randint(int(env.now) + 1,max(int(env.now)+flex*2 + 1, SIM_TIME+13))
+            date = rng_choice([(min_date+i) for i in range(1,min(flex*2 + 1,SIM_TIME+13-min_date))])
             if specialist.appointments[date].count < specialist.daily_capacity:
                 print_v(3,f"Date Selected: {date}")
                 break
@@ -263,34 +333,55 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if(env.now>1):
         print_v(4,f"Capacity - New: {[appointment.count for appointment in calendar]}")
 
+    patient.care_team[specialist.specialty] = (specialist.id,date)
     specialist.log_schedule(env, patient, failed_schedule, lag_time, delay, max_date, date)
 
     return (appointment, lag_time, delay)
 
-def refer(specialist, patient) -> (Specialty, float):
+# Given an existing patient/specialist combo, refer to the next and calculate transition time
+def refer(specialist, patient, env) -> (Specialty, float):
     network=specialist.network
     #given an input specialty and a patient class, generate a new specialty
     specialty_id = SPECIALTIES.index(specialist.specialty)
-    if(patient.pt_class > 2):
-        print(patient.pt_class)
     trans_probs = TRANSITION_MATRIX[patient.pt_class,specialty_id] # [17, ]
     # Making sure to normalize, just in case
     cumul_trans_probs = np.cumsum(trans_probs/np.sum(trans_probs))
     u1_refer = unigens["refer"].RandU01()
     new_specialty_id = np.argmin(np.where(cumul_trans_probs - u1_refer < 0, 2, cumul_trans_probs))
 
-    u1_trans = unigens["trans_exp"].RandU01()
+    u1_trans = unigens["trans-exp"].RandU01()
     tau_ij = TIME_LAG_MATRIX[patient.pt_class,specialty_id,new_specialty_id]
     # Generating an exponential with mean tau_ij
     wait_time = -tau_ij * np.log(1-u1_trans)
     new_specialty = SPECIALTIES[new_specialty_id]
-    #TODO choice -> rngstream
-    new_specialist = np.random.choice(network.specialists[new_specialty])
+
+    # PREFERENTIAL REFERRAL:
+    #if no cached specialist, refer as usual
+    if(patient.care_team[new_specialty][0]>=0):
+        #If cached specialist, autoselect with probability 1-f(time,spec)
+        time_lag = int(env.now) + wait_time - patient.care_team[new_specialty][1]
+        p_daily = 1-(1-GLOBAL_TURNOVER)**(wait_time/250)
+        spec_mod = SPECIALIST_TURNOVER_MOD[new_specialty_id]
+        transfer_prob = p_daily*spec_mod + TURNOVER_BASE
+        u = unigens["pref-referral"].RandU01()
+        if(u > transfer_prob):
+            # Go back to the same specialist
+            new_specialist = network.specialists[new_specialty][patient.care_team[new_specialty][0]]
+        else:
+            # clear the old specialist
+            patient.care_team[new_specialty] = (-1,-1)
+            new_specialist = rng_choice(unigens["refer-specialist"],network.specialists[new_specialty])
+    else:
+        # DEFAULT NON-PREFERENTIAL BEHAVIOR
+        new_specialist = rng_choice(unigens["refer-specialist"],network.specialists[new_specialty])
     return(new_specialist, wait_time)
 
 
 def main():
     # Try to use first CLI as the filename stem and second as debug, default otherwise
+    global DEBUG_LEVEL
+    global LAST_CHKPT
+    global RUN_START
     try:
         filestub = sys.argv[1]
     except:
@@ -310,6 +401,8 @@ def main():
     print_v(1,"Populated the network in %f seconds" % poptime)
 
     start=time.time()
+    LAST_CHKPT=start
+    RUN_START=start
     env.run(until=SIM_TIME)
     runtime=time.time() - start
     print_v(1,"Simulation run completed in %f seconds" % runtime)
