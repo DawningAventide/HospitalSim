@@ -1,0 +1,129 @@
+---
+title: "Final Graphs"
+author: "Jay Meyer"
+date: "2024-04-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(xtable)
+
+ref_fm_pats <- read_csv("traces/fm_base_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+ref_fm_sched <- read_csv("traces/fm_base_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+fm_nl_pats <- read_csv("traces/fm_noloyal_baseT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+fm_nl_sched <- read_csv("traces/fm_noloyal_baseT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+oph_fm_pats <- read_csv("traces/fm_ophth_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+oph_fm_sched <- read_csv("traces/fm_ophth_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+ref_gd_pats <- read_csv("traces/greedy_base_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+ref_gd_sched <- read_csv("traces/greedy_base_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+ref_lm_pats <- read_csv("traces/lm_base_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+ref_lm_sched <- read_csv("traces/lm_base_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+opt_gd_pats <- read_csv("traces/optimized_greedy_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+opt_gd_sched <- read_csv("traces/optimized_greedy_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+ref_un_pats <- read_csv("traces/uniform_base_loyalT2500N100000TrialTrue-Patient.csv",col_select=-"...1")
+ref_un_sched <- read_csv("traces/uniform_base_loyalT2500N100000TrialTrue-Scheduler.csv",col_select=-'...1')
+
+
+```
+
+
+
+
+```{r}
+ref_fm_sched %>% filter(specialty!="Home") %>%
+  filter(call_date > 250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,patient_class) %>%
+  summarize(mean_wait = mean(lag_time), med_wait = median(lag_time), mean_delay=mean(delay)) %>%
+  ggplot(aes(x=patient_class,y=mean_wait,fill=patient_class)) + geom_bar(stat='identity') + facet_wrap(~specialty) + ylab("Mean Wait Time") + xlab("Patient Class") + labs(title="First Minimum - Loyal")
+
+ref_lm_sched %>% filter(specialty!="Home") %>%
+  filter(call_date > 250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,patient_class) %>%
+  summarize(mean_wait = mean(lag_time), med_wait = median(lag_time), mean_delay=mean(delay)) %>%
+  ggplot(aes(x=patient_class,y=mean_wait,fill=patient_class)) + geom_bar(stat='identity') + facet_wrap(~specialty)  + ylab("Mean Wait Time") + xlab("Patient Class")  + labs(title="Last Minimum - Loyal")
+
+ref_gd_sched %>% filter(specialty!="Home") %>%
+  filter(call_date > 250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,patient_class) %>%
+  summarize(mean_wait = mean(lag_time), med_wait = median(lag_time), mean_delay=mean(delay)) %>%
+  ggplot(aes(x=patient_class,y=mean_wait,fill=patient_class)) + geom_bar(stat='identity') + facet_wrap(~specialty)  + ylab("Mean Wait Time") + xlab("Patient Class")  + labs(title="Greedy - Loyal")
+
+ref_un_sched %>% filter(specialty!="Home") %>%
+  filter(call_date > 250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,patient_class) %>%
+  summarize(mean_wait = mean(lag_time), med_wait = median(lag_time), mean_delay=mean(delay)) %>%
+  ggplot(aes(x=patient_class,y=mean_wait,fill=patient_class)) + geom_bar(stat='identity') + facet_wrap(~specialty)  + ylab("Mean Wait Time") + xlab("Patient Class")  + labs(title="Uniform - Loyal")
+
+```
+
+```{r}
+spec_caps <- ref_gd_sched %>% group_by(specialty) %>% summarize(cap=max(date_filled))
+
+opt_counts <- opt_gd_sched %>% group_by(specialty) %>% summarize(count = max(specialist_id)+1)
+ref_counts <- ref_gd_sched %>% group_by(specialty) %>% summarize(count=max(specialist_id)+1)
+
+opt_gd_sched %>% filter(specialty!="Home") %>%
+  filter(call_date>250) %>% 
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,appt_date) %>%
+  summarize(fill=max(date_filled)) %>%
+  left_join(spec_caps, by=c("specialty"="specialty")) %>%
+  mutate(util=fill/cap) %>%
+  ungroup() %>%
+  group_by(specialty) %>%
+  left_join(opt_counts,by=c("specialty"="specialty")) %>%
+  summarize(util=mean(util),count=max(count)) %>% xtable()
+
+ref_gd_sched %>% filter(call_date>250 & specialty=="Ophthalmology") %>% ggplot(aes(x=as.factor(patient_class),y=lag_time,fill=as.factor(patient_class))) + geom_boxplot() +  facet_wrap(~specialty) + labs(title="Greedy Scheduler, Ophthalmology Waits - Reference",fill="Patient Class") + xlab("Patient Class") + ylab("Wait Time")
+
+opt_gd_sched %>% filter(call_date>250 & specialty=="Ophthalmology") %>% ggplot(aes(x=as.factor(patient_class),y=lag_time,fill=as.factor(patient_class))) + geom_boxplot() + facet_wrap(~specialty) + labs(title="Greedy Scheduler, Ophthalmology Waits - Manually Optimized")  +xlab("Patient Class")+ylab("Wait Time") + labs(fill="Patient Class")
+```
+
+```{r}
+fm_nl_sched %>% filter(specialty!="Home" & call_date >  250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,appt_date) %>%
+  summarize(fill=max(date_filled)) %>%
+  left_join(spec_caps, by=c("specialty"="specialty")) %>%
+  mutate(util=fill/cap) %>%
+  ungroup() %>%
+  group_by(specialty) %>%
+  summarize(util=mean(util)) %>% xtable()
+```
+
+
+```{r}
+fm_nl_sched %>% filter(specialty!="Home" & call_date >  250) %>%
+  mutate(patient_class=as.factor(patient_class)) %>%
+  group_by(specialty,appt_date) %>%
+  summarize(fill=max(date_filled)) %>%
+  left_join(spec_caps, by=c("specialty"="specialty")) %>%
+  mutate(util=fill/cap) %>%
+  ungroup() %>%
+  group_by(specialty) %>%
+  summarize(util=mean(util)) #%>% xtable()
+
+
+```
+
+
+
+```{r}
+pt_adj_waits <- ref_fm_pats %>% filter(req>250,specialty!="Home") %>% mutate(nonzero_flx = ifelse(flex==0,0.5,flex), winpct=wait/nonzero_flx)
+m1 <- aov( winpct ~ patient_class, data=pt_adj_waits)
+
+summary(m1)
+pt_adj_waits %>% group_by(patient_class) %>% summarize(win=mean(winpct))
+
+```

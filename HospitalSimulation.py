@@ -13,14 +13,25 @@ SIM_TIME = 2500
 # Number of patients
 PATIENTS = 100000
 
-# Scheduling heuristic (first_min recommended, custom unimplemented)
+# Scheduling heuristic (first_min or greedy recommended)
 # Descriptions in original paper
 SCHEDULER = "first_min"
-SCHEDULERS = ['first_min','last_min','uniform','custom']
+SCHEDULERS = ['first_min','last_min','uniform','greedy']
 # Specialty names - do not change, order-sensitive
-SPECIALTIES = ["Home","Primary Care","Ophthalmology","Immunology","Cardiology","Other Dr Specialty","Urology","Gastroenterology","General Surgery","OB/GYN","Nephrology","Orthopedics","Psychiatry","Neurology","Oncology","Dermatology","Otorhinolaryngology"]
+SPECIALTIES = ["Home","Primary Care","Ophthalmology","Immunology", \
+    "Cardiology","Other Dr Specialty","Urology","Gastroenterology", \
+    "General Surgery","OB/GYN","Nephrology","Orthopedics", \
+    "Psychiatry","Neurology","Oncology","Dermatology", "Otorhinolaryngology"]
 # Count of each specialty to instantiate - based on rates per 100k patients
-SPECIALTY_COUNTS=[1,99,6,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
+
+#manually optimized
+#SPECIALTY_COUNTS=[1,120,14,2, 7,42,2,3, 2,10,2,7, 16,5,4,4,2]
+
+# default
+SPECIALTY_COUNTS=[1,99,6,2, 10,25,3,5, 8,13,4,8, 15,5,8,4,3]
+# +2 Ophthalmologists
+#SPECIALTY_COUNTS=[1,99,8,2,10,25,3,5,8,13,4,8,15,5,8,4,3]
+
 # Daily capacity of each specialty, derived from NAMCS 2016
 SPECIALTY_CAPS=[1,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
 
@@ -28,13 +39,13 @@ SPECIALTY_CAPS=[1,12,12,12,12,12,16,14,13,16,14,16,8,8,12,16,16]
 #SPECIALTY_CAPS=[99999]*17
 #SPECIALTY_COUNTS=[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 
-# Preferential Referral Settings
+# Loyalty Settings
 # Set turnover_base >= 1 to disable preferential referral and randomly assign all.
 # Yearly expected doctor turnover
 GLOBAL_TURNOVER = 0.06
 # Per-appointment turnover chance
 TURNOVER_BASE = 0.01
-
+#TURNOVER_BASE=1
 # Rate modifiers on f(doctor-related turnover,t)
 SPECIALIST_TURNOVER_MOD = [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
 
@@ -46,7 +57,8 @@ DEBUG_LEVEL = 1
 TRIAL = False
 
 # Number of progress updates to post
-# (ideally divides SIM_TIME but you can be messy, it won't break, I'll just judge you a little)
+# (ideally divides SIM_TIME but you can be messy, it won't break,
+#  I'll just judge you a little)
 PROGRESS_BARS = 100
 
 #===================================================================#
@@ -77,7 +89,7 @@ for i in range(3):
 if TRIAL:
     # adjust the seed if you want different replicable runs.
     # you know how seeds work. I hope.
-    seed0 = [23456,23456,23456,23456,23456,23456]
+    seed0 = [12345,23456,23456,23456,23456,23456]
     rngStream.SetPackageSeed(seed0)
 unigens = {}
 unigens["refer"] = rngStream.RngStream()
@@ -87,6 +99,7 @@ unigens["init-specialty"] = rngStream.RngStream()
 unigens["init-specialist"] = rngStream.RngStream()
 unigens["refer-specialist"] = rngStream.RngStream()
 unigens["pref-referral"] = rngStream.RngStream()
+unigens["uniform-choice"] = rngStream.RngStream()
 
 
 # Globally tunable debug levels
@@ -102,12 +115,18 @@ def rng_choice(generator,array):
 
 # Specialist instance class
 class Specialty(object):
+    # Virtual point-time queue for scheduling calls
     scheduling: simpy.Resource
+    # Type and numeric ID
     specialty: str
     id: int
+    # List of resources representing calendar appointments
     appointments: [simpy.Resource]
-    data: []
     daily_capacity: int
+
+    # Internal data buffer
+    data: []
+
     def __init__(self, sched, specialty, id, appointments, net, daily_capacity):
         self.scheduling = sched
         self.specialty = specialty
@@ -117,18 +136,21 @@ class Specialty(object):
         self.network=net
         self.daily_capacity= daily_capacity
 
-    def log_schedule(self, env, patient, scheduling_failed, lag_time, delay, max_date, appt_date):
+    # Write scheduling details to internal buffer
+    def log_schedule(self, env, patient, scheduling_failed, lag_time, delay, max_date, appt_date, first_avail, third_avail):
         call_date=env.now
         window_len = max_date - int(env.now + 1)
         day_full = self.appointments[appt_date].count
         day_remain = self.daily_capacity - day_full
-        self.data.append((call_date, patient.id, patient.pt_class, scheduling_failed, lag_time, delay, window_len, max_date,appt_date,day_full,day_remain))
+        self.data.append((call_date, patient.id, patient.pt_class, scheduling_failed, lag_time, delay, window_len, max_date,appt_date,day_full,day_remain,first_avail,third_avail))
 
+    # Render internal data buffer into a pandas dataframe
     def render_data(self, verbose=False):
-        scheduler_data = pd.DataFrame(self.data, columns=["call_date","patient_id","patient_class","failed_schedule", "lag_time","delay","window_len","max_date","appt_date","date_filled","date_remaining"])
+        scheduler_data = pd.DataFrame(self.data, columns=["call_date","patient_id","patient_class","failed_schedule", "lag_time","delay","window_len","max_date","appt_date","date_filled","date_remaining","first_available","third_available"])
         scheduler_data["specialty"]=self.specialty
         scheduler_data["specialist_id"]=self.id
         return scheduler_data
+
 
     def graph_capacity(self):
         scheduler_data = self.render_data(False)
@@ -163,6 +185,7 @@ class HealthNetwork(object):
                 ))
             i+=1
 
+    # Create and initialize patients into the system
     def populate_patients(self, env):
         for i in range(PATIENTS):
 
@@ -192,6 +215,8 @@ class Patient():
     last_appt: float
     pt_class: int #[0,1,2] -> ["A","B","C"]
     transition_time: float
+
+    # Known practicioners
     care_team: {}
 
     def __init__(self, specialist, id, pt_class):
@@ -203,7 +228,7 @@ class Patient():
         # specialist id, date of last contact
         self.care_team = {sp:(-1,-1) for sp in SPECIALTIES}
 
-    # Main patient loop - reference SimPy prn
+    # Main patient loop - reference SimPy documentation for help
     def patient(self, env):
 
         # Wait for scheduling call
@@ -231,7 +256,7 @@ class Patient():
             print_v(3, f'Scheduling Lag: {sched_lag}')
 
             # Once the scheduler is available, the patient schedules the appointment
-            patient_flexibility = min(sched_lag//5,7)
+            patient_flexibility = int(min(sched_lag//5,7))
             appt,wait_time,delay = schedule(self.current_specialist, patient_flexibility, self, env)
             print_v(3, f"Wait time: {wait_time}\n")
             # Patient waits for the appointment
@@ -246,6 +271,8 @@ class Patient():
             print_v(3, f"Transition Time: {self.transition_time}\n")
             yield env.timeout(self.transition_time)
             # Patient waits for the referral to process before returning to the beginning
+
+            # Log the visit details to internal data buffer
             self.log_visit(req_date, self.last_appt, wait_time, delay, self.current_specialist.specialty, self.referring_specialist.specialty, self.transition_time, patient_flexibility)
 
 
@@ -270,13 +297,16 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if specialist.specialty=="Home":
         date = int(env.now + 1)
         # auto-releasing request to unbound home capacity
-        specialist.log_schedule(env, patient, False, 0, 0, date,date)
+        specialist.log_schedule(env, patient, False, 0, 0, date,date,date,date)
         with specialist.appointments[date].request() as appointment:
             return (appointment, max(date - env.now,0), 0)
     min_date = int(env.now + 1)
     max_date = min(int(env.now + 2 + 2*flex), SIM_TIME+13)
     calendar = specialist.appointments[min_date:max_date]
     capacity = [appointment.count for appointment in calendar]
+    capacity_unb = np.array([appointment.count for appointment in specialist.appointments[min_date:SIM_TIME+13]])
+    first_avail = np.argmin(capacity_unb==specialist.daily_capacity) + min_date
+    third_avail = np.argmax((np.cumsum(-1*(capacity_unb-specialist.daily_capacity)))>=3)+ min_date
     date = min_date
     failed_schedule = False
     delaying = False
@@ -286,33 +316,43 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
     if scheduler == "first_min":
              date_raw = np.argmin(capacity)
              date = date_raw + int(env.now) + 1
-             if capacity[date_raw] >= specialist.daily_capacity: # if appointment is full
+             if specialist.appointments[date].count >= specialist.daily_capacity: # if appointment is full
                 delaying = True
              else:
                  print_v(3,f"Date Selected: {date}")
     elif scheduler == "last_min":
-             date_raw = len(capacity) - np.argmin(capacity[::-1])
+             date_raw = len(capacity) - np.argmin(capacity[::-1]) -1
              date = date_raw + int(env.now)
 
-             if capacity[date_raw] >= specialist.daily_capacity: # if appointment is full
+             if specialist.appointments[date].count >= specialist.daily_capacity: # if appointment is full
                 delaying = True
              else:
                  print_v(3,f"Date Selected: {date}")
+    elif scheduler == "greedy":
+            date = first_avail
+            if first_avail > max_date:
+                delaying=True
+            else:
+                print_v(3,f"Date Selected:{date}")
     elif scheduler == "uniform":
-        for attempt in range(min(int(flex*4),4)): # if four times the flexibility window can't find an appointment there ain't one
-            date = rng_choice([(min_date+i) for i in range(1,min(flex*2 + 1,SIM_TIME+13-min_date))])
-            if specialist.appointments[date].count < specialist.daily_capacity:
-                print_v(3,f"Date Selected: {date}")
-                break
-        delaying = True
+        temp_calendar = np.array([a for a in range(min_date, min_date + len(capacity))])
+        avail_win = temp_calendar[np.array(capacity)!=specialist.daily_capacity]
+        if len(avail_win)!=0:
+            date = rng_choice(unigens["uniform-choice"], avail_win)
+        else:
+            delaying = True
+
+    # --- IF IMPLEMENTING NEW SCHEDULING HEURISTICS DO IT HERE ---
+
     else:
-        print_v(2,f"Scheduler {scheduler} is unrecognized.")
+        print_v(0,f"Scheduler {scheduler} is unrecognized.")
 
     delay = 0
 
+    # Get the first available
     if delaying:
         failed_schedule = True
-        delayed_date = max_date
+        delayed_date = first_avail
 
         while delayed_date < SIM_TIME + 13:
             if specialist.appointments[delayed_date].count < specialist.daily_capacity:
@@ -334,7 +374,7 @@ def schedule(specialist, flex, patient, env, scheduler=SCHEDULER):
         print_v(4,f"Capacity - New: {[appointment.count for appointment in calendar]}")
 
     patient.care_team[specialist.specialty] = (specialist.id,date)
-    specialist.log_schedule(env, patient, failed_schedule, lag_time, delay, max_date, date)
+    specialist.log_schedule(env, patient, failed_schedule, lag_time, delay, max_date, date, first_avail, third_avail)
 
     return (appointment, lag_time, delay)
 
@@ -355,7 +395,7 @@ def refer(specialist, patient, env) -> (Specialty, float):
     wait_time = -tau_ij * np.log(1-u1_trans)
     new_specialty = SPECIALTIES[new_specialty_id]
 
-    # PREFERENTIAL REFERRAL:
+    # LOYAL/PREFERENTIAL REFERRAL:
     #if no cached specialist, refer as usual
     if(patient.care_team[new_specialty][0]>=0):
         #If cached specialist, autoselect with probability 1-f(time,spec)
@@ -410,14 +450,20 @@ def main():
     # Render the internal lists into data frames
     start=time.time()
     patient_data = pd.concat([patient.render_data() for patient in network.patient_vec])
-    print(patient_data.groupby('patient_class')['delay'].mean())
+    #print(patient_data.groupby('patient_class')['delay'].mean())
     scheduler_data = pd.concat([specialist.render_data() for specialist_list in network.specialists.values() for specialist in specialist_list])
+    util_tmp = scheduler_data.groupby(['specialty','appt_date'])['date_filled'].max()
+    #print("-----------Utilization-----------")
+    #print(util_tmp.groupby('specialty').mean()/util_tmp.groupby('specialty').max('appt_date'))
+    print("----------- Delays -------------")
+    print(scheduler_data.groupby('patient_class')['delay'].mean())
     rendertime = time.time() - start
     print_v(1,"Data rendering complete in %f seconds" % rendertime)
 
 
     # DATA WRITE OUT
     start=time.time()
+    # feel free to modify the form to reflect the variables you intend to change often
     filename_stub = f"{filestub}T{SIM_TIME}N{PATIENTS}Trial{TRIAL}"
     patient_data.to_csv("data/"+filename_stub+"-Patient.csv")
     scheduler_data.to_csv("data/"+filename_stub+"-Scheduler.csv")
